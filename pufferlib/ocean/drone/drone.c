@@ -123,7 +123,7 @@ int main() {
     DroneEnv *env = calloc(1, sizeof(DroneEnv));
     env->num_agents = 64;
     env->max_rings = 10;
-    env->task = ORBIT;
+    env->task = RACE;
     init(env);
 
     size_t obs_size = 26;

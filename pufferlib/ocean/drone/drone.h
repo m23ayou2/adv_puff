@@ -159,13 +159,15 @@ void reset_agent(DroneEnv *env, Drone *agent, int idx) {
 
 void c_reset(DroneEnv *env) {
   env->tick = 0;
-  int rng = rand();
+  env->task = RACE;
 
-  if (rng > INT_MAX / 2) {
-    env->task = RACE;
-  } else {
-    env->task = (DroneTask)(rng % (TASK_N - 1));
-  }
+  // int rng = rand();
+
+  // if (rng > INT_MAX / 2) {
+  //   env->task = RACE;
+  // } else {
+  //   env->task = (DroneTask)(rng % (TASK_N - 1));
+  // }
 
   if (env->task == RACE) {
     reset_rings(env->ring_buffer, env->max_rings);

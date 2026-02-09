@@ -189,17 +189,17 @@ void c_render(DroneEnv *env) {
     exit(0);
   }
 
-  if (IsKeyPressed(KEY_SPACE)) {
-    env->task = (DroneTask)((env->task + 1) % TASK_N);
+  // if (IsKeyPressed(KEY_SPACE)) {
+  //   env->task = (DroneTask)((env->task + 1) % TASK_N);
 
-    if (env->task == RACE) {
-      reset_rings(env->ring_buffer, env->max_rings);
-    }
+  //   if (env->task == RACE) {
+  //     reset_rings(env->ring_buffer, env->max_rings);
+  //   }
 
-    for (int i = 0; i < env->num_agents; i++) {
-      set_target(env->task, env->agents, i, env->num_agents);
-    }
-  }
+  //   for (int i = 0; i < env->num_agents; i++) {
+  //     set_target(env->task, env->agents, i, env->num_agents);
+  //   }
+  // }
 
   handle_camera_controls(env->client);
 

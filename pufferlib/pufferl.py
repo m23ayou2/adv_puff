@@ -18,6 +18,7 @@ import importlib
 import configparser
 from threading import Thread
 from collections import defaultdict, deque
+import torch.nn.functional as F
 
 import numpy as np
 import psutil
@@ -42,6 +43,8 @@ from rich.table import Table
 from rich.console import Console
 from rich_argparse import RichHelpFormatter
 rich.traceback.install(show_locals=False)
+
+from .adv import Player2, AdversaryPolicy
 
 import signal # Aggressively exit on ctrl+c
 signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
@@ -174,6 +177,62 @@ class PuffeRL:
             )
         else:
             raise ValueError(f'Unknown optimizer: {config["optimizer"]}')
+
+        # Optimizer
+        self.net = Player2().to(device)
+        if config['optimizer'] == 'adam':
+            self.optimizer_net = torch.optim.Adam(
+                self.net.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+            )
+        elif config['optimizer'] == 'muon':
+            import heavyball
+            from heavyball import ForeachMuon
+            warnings.filterwarnings(action='ignore', category=UserWarning, module=r'heavyball.*')
+            heavyball.utils.compile_mode = "default"
+            self.optimizer_net = ForeachMuon(
+                self.net.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+                heavyball_momentum=True,
+            )
+        else:
+            raise ValueError(f'Unknown optimizer: {config["optimizer"]}')
+        
+
+
+        self.player2_state = {'lstm_h': None, 'lstm_c': None}
+        
+        # Adversary policy for observation masking
+        self.adversary = AdversaryPolicy().to(device)  # Reuse Player2 as adversary mask generator
+        self.adversary_state = {'lstm_h': None, 'lstm_c': None}
+
+        if config['optimizer'] == 'adam':
+            self.optimizer_adv = torch.optim.Adam(
+                self.adversary.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+            )
+        elif config['optimizer'] == 'muon':
+            import heavyball
+            from heavyball import ForeachMuon
+            warnings.filterwarnings(action='ignore', category=UserWarning, module=r'heavyball.*')
+            heavyball.utils.compile_mode = "default"
+            self.optimizer_adv = ForeachMuon(
+                self.adversary.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+                heavyball_momentum=True,
+            )
+        else:
+            raise ValueError(f'Unknown optimizer: {config["optimizer"]}')
+
+
 
         self.optimizer = optimizer
 
@@ -474,6 +533,156 @@ class PuffeRL:
             self.msg = f'Checkpoint saved at update {self.epoch}'
 
         return logs
+
+
+
+
+
+    @record
+    def train_p1_2(self, nbr_iterations=2):
+        profile = self.profile
+        epoch = self.epoch
+        profile('train', epoch)
+        profile('train_misc', epoch, nest=True)
+        losses = defaultdict(float)
+        config = self.config
+        device = config['device']
+
+        b0 = config['prio_beta0']
+        a = config['prio_alpha']
+        clip_coef = config['clip_coef']
+        vf_clip = config['vf_clip_coef']
+        anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
+        self.ratio[:] = 1
+        loss_record = torch.zeros(nbr_iterations)
+        for mb in range(nbr_iterations):
+            profile('train_misc', epoch)
+            self.amp_context.__enter__()
+
+            shape = self.values.shape
+            advantages = torch.zeros(shape, device=device)
+            advantages = compute_puff_advantage(self.values, self.rewards,
+                self.terminals, self.ratio, advantages, config['gamma'],
+                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
+            # Prioritize experience by advantage magnitude
+            adv = advantages.abs().sum(axis=1)
+            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+            prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
+            idx = torch.multinomial(prio_probs, self.minibatch_segments)
+
+            profile('train_copy', epoch)
+            mb_obs = self.observations[idx]
+
+            obs_in_  = mb_obs[:, :-1, 9:]   # observed for the Player2 model 
+            obs_out_ = mb_obs[:, 1:, 9:]    # target is next step
+
+            # Adversary generates mask to hide observations from Player2
+            with torch.no_grad():
+                masked_obs, mask = self.adversary(obs_in_)
+            
+            preds, self.player2_state = self.net(masked_obs)
+
+            # Player2 loss: predict next observation (lower is better for us, higher for adversary)
+            loss2 = F.mse_loss(preds, obs_out_)
+            
+            # Adversary loss: maximize Player2's prediction error (negate so we minimize)
+            #adversary_loss = -loss2
+
+            losses['prediction_loss'] += loss2.item() / nbr_iterations
+            #losses['adversary_loss'] += adversary_loss.item() / nbr_iterations
+
+
+            loss_record[mb] = loss2.detach()
+
+
+            loss2.backward()
+            #adversary_loss.backward(retain_graph=True)  # Train adversary to maximize prediction error
+
+            if (mb + 1) % self.accumulate_minibatches == 0:
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), config['max_grad_norm'])
+                self.optimizer_net.step()
+                self.optimizer_net.zero_grad()
+
+        return loss_record
+
+
+
+
+    @record
+    def train_p2(self, nbr_iterations=2):
+        profile = self.profile
+        epoch = self.epoch
+        profile('train', epoch)
+        profile('train_misc', epoch, nest=True)
+        losses = defaultdict(float)
+        config = self.config
+        device = config['device']
+
+        b0 = config['prio_beta0']
+        a = config['prio_alpha']
+        clip_coef = config['clip_coef']
+        vf_clip = config['vf_clip_coef']
+        anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
+        self.ratio[:] = 1
+        loss_record = torch.zeros(nbr_iterations)
+        for mb in range(nbr_iterations):
+            profile('train_misc', epoch)
+            self.amp_context.__enter__()
+
+            shape = self.values.shape
+            advantages = torch.zeros(shape, device=device)
+            advantages = compute_puff_advantage(self.values, self.rewards,
+                self.terminals, self.ratio, advantages, config['gamma'],
+                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
+            # Prioritize experience by advantage magnitude
+            adv = advantages.abs().sum(axis=1)
+            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+            prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
+            idx = torch.multinomial(prio_probs, self.minibatch_segments)
+
+            profile('train_copy', epoch)
+            mb_obs = self.observations[idx]
+
+            obs_in_  = mb_obs[:, :-1, 9:]   # observed for the Player2 model 
+            obs_out_ = mb_obs[:, 1:, 9:]    # target is next step
+
+            # Adversary generates mask to hide observations from Player2
+
+            masked_obs, mask = self.adversary(obs_in_)
+            
+            preds, self.player2_state = self.net(masked_obs)
+
+            # Player2 loss: predict next observation (lower is better for us, higher for adversary)
+            loss2 = F.mse_loss(preds, obs_out_)
+            
+            # Adversary loss: maximize Player2's prediction error (negate so we minimize)
+            adversary_loss = -loss2
+
+            #losses['prediction_loss'] += loss2.item() / nbr_iterations
+            losses['adversary_loss'] += adversary_loss.item() / nbr_iterations
+
+
+            loss_record[mb] = loss2.detach()
+
+
+            adversary_loss.backward()
+            #adversary_loss.backward(retain_graph=True)  # Train adversary to maximize prediction error
+
+            if (mb + 1) % self.accumulate_minibatches == 0:
+                torch.nn.utils.clip_grad_norm_(self.adversary.parameters(), config['max_grad_norm'])
+                self.optimizer_adv.step()
+                self.optimizer_adv.zero_grad()
+
+        return loss_record
+
+
+
+
+
+
+
 
     def mean_and_log(self):
         config = self.config
@@ -949,6 +1158,11 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
     # Sweep needs data for early stopped runs, so send data when steps > 100M
     logging_threshold = min(0.20*train_config['total_timesteps'], 100_000_000)
     all_logs = []
+    stacked_array_p1_1 = np.empty((0, 1))
+    stacked_array_p1_2 = np.empty((0, 1))
+    stacked_array_p2 = np.empty((0, 1))
+
+
 
     while pufferl.global_step < train_config['total_timesteps']:
         if train_config['device'] == 'cuda':
@@ -957,6 +1171,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
         if train_config['device'] == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
         logs = pufferl.train()
+        loss_p1_2 = pufferl.train_p1_2()
+        loss_p2 = pufferl.train_p2()
+        loss_p1_1 = 0 
+        stacked_array_p1_1 = np.vstack((stacked_array_p1_1, [[loss_p1_1]]))
+        stacked_array_p1_2 = np.vstack((stacked_array_p1_2, [[loss_p1_2.mean().cpu().item() if hasattr(loss_p1_2, 'mean') else loss_p1_2]]))
+        stacked_array_p2 = np.vstack((stacked_array_p2, [[loss_p2.mean().cpu().item() if hasattr(loss_p2, 'mean') else loss_p2]]))
 
         if logs is not None:
             should_stop_early = False
@@ -973,6 +1193,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
                 model_path = pufferl.close()
                 pufferl.logger.close(model_path, early_stop=True)
                 return all_logs
+
+    # Save to CSV
+    np.savetxt('outputp1_1.csv', stacked_array_p1_1, delimiter=',', fmt='%d')
+    np.savetxt('outputp1_2.csv', stacked_array_p1_2, delimiter=',', fmt='%d')
+    np.savetxt('outputp2.csv', stacked_array_p2, delimiter=',', fmt='%d')
+
 
     # Final eval. You can reset the env here, but depending on
     # your env, this can skew data (i.e. you only collect the shortest

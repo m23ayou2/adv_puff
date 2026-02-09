@@ -237,7 +237,7 @@ class Multiprocessing:
  
     def __init__(self, env_creators, env_args, env_kwargs,
             num_envs, num_workers=None, batch_size=None,
-            zero_copy=True, sync_traj=True, overwork=False, seed=0, **kwargs):
+            zero_copy=True, sync_traj=True, overwork=True, seed=0, **kwargs):
         if batch_size is None:
             batch_size = num_envs
         if num_workers is None:
