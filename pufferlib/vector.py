@@ -96,6 +96,9 @@ class Serial:
         self.initialized = False
         self.flag = RESET
 
+    def __getattr__(self, name):
+        return getattr(self.driver_env, name)
+
     def _avg_infos(self):
         infos = {}
         for e in self.infos:
@@ -487,6 +490,9 @@ class Multiprocessing:
         for p in self.processes:
             p.terminate()
 
+    def __getattr__(self, name):
+        return getattr(self.driver_env, name)
+
 class Ray():
     '''Runs environments in parallel on multiple processes using Ray
 
@@ -613,6 +619,9 @@ class Ray():
     def close(self):
         self.ray.get([e.close.remote() for e in self.envs])
         self.ray.shutdown()
+
+    def __getattr__(self, name):
+        return getattr(self.driver_env, name)
 
 
 def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=PufferEnv, num_envs=1, seed=0, **kwargs):

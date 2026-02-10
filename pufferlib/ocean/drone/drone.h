@@ -20,6 +20,7 @@ struct DroneEnv {
   float *actions;
   float *rewards;
   unsigned char *terminals;
+  float *predicted_to_target;
 
   Log log;
   int tick;
@@ -38,6 +39,7 @@ struct DroneEnv {
 void init(DroneEnv *env) {
   env->agents = (Drone*) calloc(env->num_agents, sizeof(Drone));
   env->ring_buffer = (Target*) calloc(env->max_rings, sizeof(Target));
+  env->predicted_to_target = (float*) calloc(env->num_agents * 3, sizeof(float));
 
   for (int i = 0; i < env->num_agents; i++) {
     env->agents[i].target = (Target*) calloc(1, sizeof(Target));
@@ -270,6 +272,7 @@ void c_close(DroneEnv *env) {
     free(env->agents[i].target);
   }
 
+  free(env->predicted_to_target);
   free(env->agents);
   free(env->ring_buffer);
 

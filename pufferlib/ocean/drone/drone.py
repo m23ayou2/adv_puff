@@ -30,6 +30,9 @@ class Drone(pufferlib.PufferEnv):
         self.render_mode = render_mode
         self.report_interval = report_interval
         self.tick = 0
+        self._num_envs = num_envs
+        self._num_drones = num_drones
+        self._predicted_to_target = None
 
         super().__init__(buf)
         self.actions = self.actions.astype(np.float32)
@@ -47,6 +50,7 @@ class Drone(pufferlib.PufferEnv):
                 max_rings=max_rings,
             ))
 
+        self._c_env_handles = c_envs
         self.c_envs = binding.vectorize(*c_envs)
 
     def reset(self, seed=None):
@@ -68,8 +72,52 @@ class Drone(pufferlib.PufferEnv):
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
-    def render(self):
+    def render(self, predicted_to_target=None):
+        if predicted_to_target is not None:
+            self.set_predicted_to_target(predicted_to_target)
         binding.vec_render(self.c_envs, 0)
+
+    def set_predicted_to_target(self, predicted_to_target):
+        if predicted_to_target is None:
+            for env_handle in self._c_env_handles:
+                binding.env_put(env_handle, predicted_to_target=None)
+            return
+
+        predicted_to_target = np.asarray(predicted_to_target, dtype=np.float32)
+
+        if predicted_to_target.shape == (self.num_agents, 3):
+            predicted_to_target = predicted_to_target.reshape(
+                self._num_envs, self._num_drones, 3
+            )
+        elif predicted_to_target.shape == (self._num_envs, self._num_drones, 3):
+            pass
+        elif (
+            predicted_to_target.ndim == 2
+            and predicted_to_target.shape[1] == 3
+            and predicted_to_target.shape[0] % self.num_agents == 0
+        ):
+            predicted_to_target = predicted_to_target[: self.num_agents].reshape(
+                self._num_envs, self._num_drones, 3
+            )
+        elif (
+            predicted_to_target.ndim == 4
+            and predicted_to_target.shape[1:] == (self._num_envs, self._num_drones, 3)
+        ):
+            predicted_to_target = predicted_to_target[0]
+        else:
+            raise ValueError(
+                "predicted_to_target must have shape (num_agents, 3), "
+                "(num_envs, num_drones, 3), or be a multiple of num_agents"
+            )
+
+        # Keep a reference to prevent garbage collection
+        self._predicted_to_target_buffer = predicted_to_target
+
+        for i, env_handle in enumerate(self._c_env_handles):
+            binding.env_put(
+                env_handle,
+                predicted_to_target=self._predicted_to_target_buffer[i],
+            )
 
     def close(self):
         binding.vec_close(self.c_envs)

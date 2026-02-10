@@ -111,6 +111,8 @@ class PuffeRL:
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
+        self._predicted_to_target = np.zeros((total_agents, 3), dtype=np.float32)
+        self._player2_render_state = None
 
         # LSTM
         if config['use_rnn']:
@@ -297,7 +299,8 @@ class PuffeRL:
         if config['use_rnn']:
             for k in self.lstm_h:
                 self.lstm_h[k].zero_()
-                self.lstm_c[k].zero_()
+
+        self._player2_render_state = None
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -315,6 +318,20 @@ class PuffeRL:
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
+
+            set_predicted = getattr(self.vecenv, 'set_predicted_to_target', None)
+            if set_predicted is None and hasattr(self.vecenv, 'driver_env'):
+                set_predicted = getattr(self.vecenv.driver_env, 'set_predicted_to_target', None)
+
+            if set_predicted is not None:
+                with torch.no_grad(), self.amp_context:
+                    obs_in = o_device[:, 9:].unsqueeze(1)
+                    preds, self._player2_render_state = self.net(
+                        obs_in, self._player2_render_state
+                    )
+                pred_to_target = preds[:, 0, 5:8].float().cpu().numpy()
+                self._predicted_to_target[env_id] = pred_to_target
+                set_predicted(self._predicted_to_target)
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
@@ -1195,9 +1212,9 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
                 return all_logs
 
     # Save to CSV
-    np.savetxt('outputp1_1.csv', stacked_array_p1_1, delimiter=',', fmt='%d')
-    np.savetxt('outputp1_2.csv', stacked_array_p1_2, delimiter=',', fmt='%d')
-    np.savetxt('outputp2.csv', stacked_array_p2, delimiter=',', fmt='%d')
+    np.savetxt('outputp1_1.csv', stacked_array_p1_1, delimiter=',', fmt='%f')
+    np.savetxt('outputp1_2.csv', stacked_array_p1_2, delimiter=',', fmt='%f')
+    np.savetxt('outputp2.csv', stacked_array_p2, delimiter=',', fmt='%f')
 
 
     # Final eval. You can reset the env here, but depending on
