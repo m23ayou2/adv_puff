@@ -116,8 +116,15 @@ void set_target_flag(Drone* agent, int idx) {
 }
 
 void set_target_race(Drone* agent) {
-  agent->buffer_idx = (agent->buffer_idx + 1) % agent->buffer_size;
-  *agent->target = agent->buffer[agent->buffer_idx];
+  if (agent->buffer_idx + 1 < agent->buffer_size) {
+    agent->buffer_idx += 1;
+    *agent->target = agent->buffer[agent->buffer_idx];
+  } else {
+    // Finished the ring sequence: hover at origin
+    agent->buffer_idx = agent->buffer_size;
+    agent->target->pos = (Vec3){0.0f, 0.0f, 0.0f};
+    agent->target->vel = (Vec3){0.0f, 0.0f, 0.0f};
+  }
 }
 
 void set_target(DroneTask task, Drone* agents, int idx, int num_agents) {

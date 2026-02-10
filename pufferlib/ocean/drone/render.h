@@ -69,9 +69,9 @@ static inline Vec3 render_position_predicted(const DroneEnv *env, int idx) {
   }
   const float *pred = env->predicted_to_target + (idx * 3);
   return (Vec3){
-      pred[0] * GRID_X,
-      pred[1] * GRID_Y,
-      pred[2] * GRID_Z,
+      pred[0],
+      pred[1],
+      pred[2],
   };
 }
 

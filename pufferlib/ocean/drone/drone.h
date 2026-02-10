@@ -206,28 +206,33 @@ void c_step(DroneEnv *env) {
     float reward = 0.0f;
 
     if (env->task == RACE) {
-      // Check ring passage
-      Target *ring = &env->ring_buffer[agent->buffer_idx];
-      int ring_passage = check_ring(agent, ring);
+      if (agent->buffer_idx >= agent->buffer_size) {
+        // Finished race: hover at origin
+        reward = static_task_reward(agent, collision);
+      } else {
+        // Check ring passage
+        Target *ring = &env->ring_buffer[agent->buffer_idx];
+        int ring_passage = check_ring(agent, ring);
 
-      // Ring collision
-      if (ring_passage < 0) {
-        env->rewards[i] = (float)ring_passage;
-        agent->episode_return += (float)ring_passage;
-        env->terminals[i] = 1;
-        add_log(env, i, false, true, false);
-        reset_agent(env, agent, i);
-        set_target(env->task, env->agents, i, env->num_agents);
-        continue;
+        // Ring collision
+        if (ring_passage < 0) {
+          env->rewards[i] = (float)ring_passage;
+          agent->episode_return += (float)ring_passage;
+          env->terminals[i] = 1;
+          add_log(env, i, false, true, false);
+          reset_agent(env, agent, i);
+          set_target(env->task, env->agents, i, env->num_agents);
+          continue;
+        }
+
+        // Successfully passed through ring - advance to next
+        if (ring_passage > 0) {
+          set_target(env->task, env->agents, i, env->num_agents);
+          env->log.rings_passed += 1.0f;
+        }
+
+        reward = dynamic_task_reward(agent, collision, ring_passage);
       }
-
-      // Successfully passed through ring - advance to next
-      if (ring_passage > 0) {
-        set_target(env->task, env->agents, i, env->num_agents);
-        env->log.rings_passed += 1.0f;
-      }
-
-      reward = dynamic_task_reward(agent, collision, ring_passage);
     } else {
       reward = static_task_reward(agent, collision);
     }
